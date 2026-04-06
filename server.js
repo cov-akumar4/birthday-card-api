@@ -67,29 +67,37 @@ const generateCard = async (data) => {
     const page = await currentBrowser.newPage();
     
     try {
-        // Set Retina Resolution (3x instead of 5x for speed)
+        // Set Resolution (3x for HD balance)
         await page.setViewport({ 
             width: 1200, 
             height: 1200, 
             deviceScaleFactor: 3 
         });
 
+        // Load content and wait for it to be ready
         await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+        await page.evaluate(() => document.fonts.ready);
 
         const cardElement = await page.$('.card, .card-2, .card-3');
         let screenshotBuffer;
+        
         if (cardElement) {
             const box = await cardElement.boundingBox();
-            if (box) {
+            if (box && box.width > 0 && box.height > 0) {
                 // Add 5% margin
                 const margin = Math.max(box.width, box.height) * 0.05;
                 const clip = {
-                    x: box.x - margin,
-                    y: box.y - margin,
+                    x: Math.max(0, box.x - margin),
+                    y: Math.max(0, box.y - margin),
                     width: box.width + (margin * 2),
                     height: box.height + (margin * 2)
                 };
-                screenshotBuffer = await page.screenshot({ type: 'png', clip });
+                
+                // Ensure clip is within viewport to avoid errors
+                screenshotBuffer = await page.screenshot({ 
+                    type: 'png', 
+                    clip: clip 
+                });
             } else {
                 screenshotBuffer = await cardElement.screenshot({ type: 'png' });
             }
@@ -98,9 +106,18 @@ const generateCard = async (data) => {
         }
         return screenshotBuffer;
     } finally {
-        // Always close the page, but KEEP the browser open for the next request
         await page.close();
     }
+};
+
+// Common Send function to handle headers properly
+const sendImage = (res, buffer) => {
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Length', buffer.length);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.send(buffer);
 };
 
 // 1. API for real user data
@@ -122,8 +139,7 @@ app.post('/generate-birthday-card', upload.single('employeeImage'), async (req, 
             profileImage: employeePhotoBase64
         });
 
-        res.setHeader('Content-Type', 'image/png');
-        res.send(cardBuffer);
+        sendImage(res, cardBuffer);
 
     } catch (error) {
         console.error('Error generating card:', error);
@@ -142,9 +158,7 @@ app.get('/generate-dummy-card', async (req, res) => {
         };
 
         const cardBuffer = await generateCard(dummyData);
-
-        res.setHeader('Content-Type', 'image/png');
-        res.send(cardBuffer);
+        sendImage(res, cardBuffer);
 
     } catch (error) {
         console.error('Error generating dummy card:', error);
@@ -156,7 +170,6 @@ app.get('/', (req, res) => res.send('Birthday Card Generator is running!'));
 
 app.listen(port, async () => {
     console.log(`Birthday card generator listening on port ${port}`);
-    // Pre-launch browser to avoid delay on first request
     try {
         await getBrowser();
         console.log('Puppeteer browser pre-launched and ready.');
