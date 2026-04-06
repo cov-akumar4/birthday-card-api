@@ -18,6 +18,19 @@ const upload = multer({ storage: storage });
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// --- PUPPETEER BROWSER REUSE LOGIC ---
+let browser;
+const getBrowser = async () => {
+    if (!browser || !browser.isConnected()) {
+        console.log('Launching new browser instance...');
+        browser = await puppeteer.launch({
+            headless: "new",
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        });
+    }
+    return browser;
+};
+
 // Helper to get day and month from a date string (e.g., "2023-07-23")
 const parseDate = (dateStr) => {
     const date = new Date(dateStr);
@@ -45,52 +58,52 @@ const generateCard = async (data) => {
     const randomIndex = Math.floor(Math.random() * templates.length);
     const selected = templates[randomIndex];
     
-    // Inject the selected logo as a Data URI for robustness
+    // Inject the selected logo as a Data URI
     data.logoPath = getLogoDataUri(selected.logo);
     const htmlContent = selected.func(data);
 
-    // Launch Puppeteer with necessary flags for hosting platforms
-    const browser = await puppeteer.launch({
-        headless: "new",
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-    });
-    const page = await browser.newPage();
+    // Use shared browser instance
+    const currentBrowser = await getBrowser();
+    const page = await currentBrowser.newPage();
     
-    // Set HD Resolution
-    await page.setViewport({ 
-        width: 1200, 
-        height: 1200, 
-        deviceScaleFactor: 5 
-    });
+    try {
+        // Set Retina Resolution (3x instead of 5x for speed)
+        await page.setViewport({ 
+            width: 1200, 
+            height: 1200, 
+            deviceScaleFactor: 3 
+        });
 
-    await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
 
-    const cardElement = await page.$('.card, .card-2, .card-3');
-    let screenshotBuffer;
-    if (cardElement) {
-        const box = await cardElement.boundingBox();
-        if (box) {
-            // Add 5% margin
-            const margin = Math.max(box.width, box.height) * 0.05;
-            const clip = {
-                x: box.x - margin,
-                y: box.y - margin,
-                width: box.width + (margin * 2),
-                height: box.height + (margin * 2)
-            };
-            screenshotBuffer = await page.screenshot({ type: 'png', clip });
+        const cardElement = await page.$('.card, .card-2, .card-3');
+        let screenshotBuffer;
+        if (cardElement) {
+            const box = await cardElement.boundingBox();
+            if (box) {
+                // Add 5% margin
+                const margin = Math.max(box.width, box.height) * 0.05;
+                const clip = {
+                    x: box.x - margin,
+                    y: box.y - margin,
+                    width: box.width + (margin * 2),
+                    height: box.height + (margin * 2)
+                };
+                screenshotBuffer = await page.screenshot({ type: 'png', clip });
+            } else {
+                screenshotBuffer = await cardElement.screenshot({ type: 'png' });
+            }
         } else {
-            screenshotBuffer = await cardElement.screenshot({ type: 'png' });
+            screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png' });
         }
-    } else {
-        screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png' });
+        return screenshotBuffer;
+    } finally {
+        // Always close the page, but KEEP the browser open for the next request
+        await page.close();
     }
-
-    await browser.close();
-    return screenshotBuffer;
 };
 
-// 1. API for real user data (requires image upload)
+// 1. API for real user data
 app.post('/generate-birthday-card', upload.single('employeeImage'), async (req, res) => {
     try {
         const { employeeName, birthdayDate } = req.body;
@@ -114,18 +127,18 @@ app.post('/generate-birthday-card', upload.single('employeeImage'), async (req, 
 
     } catch (error) {
         console.error('Error generating card:', error);
-        res.status(500).json({ error: 'Failed to generate real birthday card' });
+        res.status(500).json({ error: 'Failed to generate card' });
     }
 });
 
-// 2. API for dummy user data (no upload required, uses logo as dummy image)
+// 2. API for dummy user data
 app.get('/generate-dummy-card', async (req, res) => {
     try {
         const dummyData = {
             name: "Dummy Employee",
             day: "21",
             month: "June",
-            profileImage: getLogoDataUri('logo-black.png') // Using logo as placeholder
+            profileImage: getLogoDataUri('logo-black.png')
         };
 
         const cardBuffer = await generateCard(dummyData);
@@ -139,9 +152,15 @@ app.get('/generate-dummy-card', async (req, res) => {
     }
 });
 
-// Health check endpoint for hosting platforms
 app.get('/', (req, res) => res.send('Birthday Card Generator is running!'));
 
-app.listen(port, () => {
+app.listen(port, async () => {
     console.log(`Birthday card generator listening on port ${port}`);
+    // Pre-launch browser to avoid delay on first request
+    try {
+        await getBrowser();
+        console.log('Puppeteer browser pre-launched and ready.');
+    } catch (e) {
+        console.error('Failed to pre-launch browser:', e);
+    }
 });
