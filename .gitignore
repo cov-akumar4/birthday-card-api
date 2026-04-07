@@ -4,3 +4,4 @@ uploads/
 *.png
 !assests/*.png
 .env
+package-lock.json

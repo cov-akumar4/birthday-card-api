@@ -3,6 +3,8 @@ const multer = require('multer');
 const path = require('path');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
+const axios = require('axios');
+const cors = require('cors');
 
 const templateOne = require('./template-one');
 const templateTwo = require('./template-two');
@@ -10,6 +12,13 @@ const templateThree = require('./template-three');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+app.use(cors()); // allow frontend calls
+
+// Cache for CMS data (simple in-memory)
+let cache = null;
+let lastFetch = 0;
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 // Setup Multer for image uploads (uses memory storage)
 const storage = multer.memoryStorage();
@@ -119,6 +128,66 @@ const sendImage = (res, buffer) => {
     res.setHeader('Expires', '0');
     res.send(buffer);
 };
+
+// Webflow CMS API endpoint
+app.get('/cms', async (req, res) => {
+  try {
+    // Serve cache if valid
+    if (cache && Date.now() - lastFetch < CACHE_TTL) {
+      return res.json(cache);
+    }
+     
+    const COLLECTION_ID = '696901dbe869a47c33ae9899';
+    const WEBFLOW_TOKEN = '99ca51c5de50f55fdda784487b191d978b63c11001d81573e0a4825a1a1286d0';
+
+    const response = await axios.get(
+      `https://api.webflow.com/v2/collections/${COLLECTION_ID}/items`,
+      {
+        headers: {
+          Authorization: `Bearer ${WEBFLOW_TOKEN}`,
+        },
+      }
+    );
+
+    const items = response.data.items || [];
+
+    // Build optimized search index (same as your frontend logic)
+    const index = items.map(item => {
+      const f = item.fieldData || {};
+
+      const strip = html =>
+        (html || '')
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+
+      return {
+        slug: f.slug,
+        searchBlob: [
+          f.name,
+          f.subtitle,
+          f.background,
+          f.challenge,
+          f.solution,
+          strip(f.implementation),
+          strip(f.results),
+        ]
+          .join(' ')
+          .toLowerCase(),
+      };
+    });
+
+    // Save cache
+    cache = index;
+    lastFetch = Date.now();
+
+    res.json(index);
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to fetch CMS data' });
+  }
+});
 
 // 1. API for real user data
 app.post('/generate-birthday-card', upload.single('employeeImage'), async (req, res) => {
